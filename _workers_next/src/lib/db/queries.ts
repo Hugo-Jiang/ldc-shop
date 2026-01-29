@@ -921,6 +921,65 @@ export async function getProduct(id: string, options?: { isLoggedIn?: boolean; t
     })
 }
 
+export async function getProductWithCardStats(id: string, options?: { isLoggedIn?: boolean; trustLevel?: number | null }) {
+    await ensureCardsColumns();
+    return await withProductColumnFallback(async () => {
+        const nowMs = Date.now();
+        const fiveMinutesAgo = nowMs - 5 * 60 * 1000;
+        const cardAgg = db.select({
+            productId: cards.productId,
+            unused: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${cards.isUsed}, 0) = 0 AND (${cards.expiresAt} IS NULL OR ${cards.expiresAt} > ${nowMs}) THEN 1 ELSE 0 END), 0)`,
+            available: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${cards.isUsed}, 0) = 0 AND (${cards.expiresAt} IS NULL OR ${cards.expiresAt} > ${nowMs}) AND (${cards.reservedAt} IS NULL OR ${cards.reservedAt} < ${fiveMinutesAgo}) THEN 1 ELSE 0 END), 0)`,
+            locked: sql<number>`COALESCE(SUM(CASE WHEN COALESCE(${cards.isUsed}, 0) = 0 AND (${cards.expiresAt} IS NULL OR ${cards.expiresAt} > ${nowMs}) AND ${cards.reservedAt} IS NOT NULL AND ${cards.reservedAt} >= ${fiveMinutesAgo} THEN 1 ELSE 0 END), 0)`
+        })
+            .from(cards)
+            .where(eq(cards.productId, id))
+            .groupBy(cards.productId)
+            .as('card_agg');
+
+        const result = await db.select({
+            id: products.id,
+            name: products.name,
+            description: products.description,
+            price: products.price,
+            compareAtPrice: products.compareAtPrice,
+            image: products.image,
+            category: products.category,
+            isHot: products.isHot,
+            isActive: products.isActive,
+            isShared: products.isShared,
+            purchaseLimit: products.purchaseLimit,
+            purchaseWarning: products.purchaseWarning,
+            visibilityLevel: products.visibilityLevel,
+            stock: sql<number>`COALESCE(${products.stockCount}, 0)`,
+            locked: sql<number>`COALESCE(${products.lockedCount}, 0)`,
+            rating: sql<number>`COALESCE(${products.rating}, 0)`,
+            reviewCount: sql<number>`COALESCE(${products.reviewCount}, 0)`,
+            liveUnused: sql<number>`COALESCE(${cardAgg.unused}, 0)`,
+            liveAvailable: sql<number>`COALESCE(${cardAgg.available}, 0)`,
+            liveLocked: sql<number>`COALESCE(${cardAgg.locked}, 0)`
+        })
+            .from(products)
+            .leftJoin(cardAgg, eq(products.id, cardAgg.productId))
+            .where(and(eq(products.id, id), visibilityCondition(options?.isLoggedIn, options?.trustLevel)));
+
+        const row = result[0];
+        if (!row || row.isActive === false) {
+            return null;
+        }
+
+        const { liveUnused, liveAvailable, liveLocked, ...product } = row as any;
+        return {
+            product,
+            stats: {
+                unused: Number(liveUnused || 0),
+                available: Number(liveAvailable || 0),
+                locked: Number(liveLocked || 0)
+            }
+        };
+    });
+}
+
 export async function getProductVisibility(id: string) {
     return await withProductColumnFallback(async () => {
         const result = await db.select({

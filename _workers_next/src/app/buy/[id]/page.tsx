@@ -2,7 +2,7 @@ import { notFound } from "next/navigation"
 import { auth } from "@/lib/auth"
 import { BuyContent } from "@/components/buy-content"
 import { BuyRestricted } from "@/components/buy-restricted"
-import { cancelExpiredOrders, cleanupExpiredCardsIfNeeded, getProduct, getProductReviews, getProductRating, canUserReview, getProductVisibility, getLiveCardStats } from "@/lib/db/queries"
+import { cancelExpiredOrders, cleanupExpiredCardsIfNeeded, getProductWithCardStats, getProductReviews, canUserReview, getProductVisibility } from "@/lib/db/queries"
 import { getEmailSettings } from "@/lib/email"
 import { INFINITE_STOCK } from "@/lib/constants"
 
@@ -25,11 +25,13 @@ export default async function BuyPage({ params }: BuyPageProps) {
     }
 
     // Run all queries in parallel for better performance
-    const [product, reviews, emailSettings] = await Promise.all([
-        getProduct(id, { isLoggedIn, trustLevel }).catch(() => null),
+    const [detail, reviews, emailSettings] = await Promise.all([
+        getProductWithCardStats(id, { isLoggedIn, trustLevel }).catch(() => null),
         getProductReviews(id).catch(() => []),
         getEmailSettings().catch(() => ({ apiKey: null, fromEmail: null, enabled: false, fromName: null }))
     ])
+
+    const product = detail?.product ?? null;
 
     // Return 404 if product doesn't exist or is inactive
     if (!product) {
@@ -56,8 +58,7 @@ export default async function BuyPage({ params }: BuyPageProps) {
         }
     }
 
-    const liveStats = product ? await getLiveCardStats([product.id]).catch(() => new Map()) : new Map()
-    const stat = product ? (liveStats.get(product.id) || { unused: 0, available: 0, locked: 0 }) : { unused: 0, available: 0, locked: 0 }
+    const stat = detail?.stats ?? { unused: 0, available: 0, locked: 0 };
     const liveAvailable = product
         ? (product.isShared
             ? (stat.unused > 0 ? INFINITE_STOCK : 0)
